@@ -34,9 +34,9 @@ jobs:
       - name: Run checker
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          FETCH_BACKEND: auto          # -> usa httpx; cae a Playwright en 403/5xx
+          FETCH_BACKEND: playwright          # -> usa httpx; cae a Playwright en 403/5xx
           HTTP_TIMEOUT: "30"
-          HTTP_RETRIES: "2"
+          HTTP_RETRIES: "1"
           HTTP_BACKOFF: "1.0"
         run: |
           python main.py
