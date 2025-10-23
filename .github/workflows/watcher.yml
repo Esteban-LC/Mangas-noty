@@ -1,54 +1,54 @@
-name: Mangas Noty
+name: Manga checker
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/15 * * * *"   # o como lo tengas
+    - cron: "*/20 * * * *" 
 
 permissions:
   contents: write
 
 jobs:
-  check:
+  run:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          persist-credentials: true
-          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Install Playwright (Chromium)
-        run: |
           python -m playwright install --with-deps chromium
 
       - name: Run checker
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          FETCH_BACKEND: playwright          # -> usa httpx; cae a Playwright en 403/5xx
-          HTTP_TIMEOUT: "30"
+          FETCH_BACKEND: playwright             # fuerza playwright
+          HTTP_TIMEOUT: "40"
           HTTP_RETRIES: "1"
           HTTP_BACKOFF: "1.0"
+          # Si necesitas proxy, agrega el secret y descomenta:
+          # HTTPS_PROXY: ${{ secrets.HTTPS_PROXY }}
         run: |
           python main.py
 
       - name: Commit updated series.yaml (si cambió)
+        if: ${{ always() }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if [[ -n "$(git status --porcelain series.yaml)" ]]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
             git add series.yaml
             git commit -m "chore: update last_chapter [skip ci]"
-            git push origin HEAD:${GITHUB_REF_NAME}
+            git push
           else
-            echo "Sin cambios en series.yaml"
+            echo "No hay cambios en series.yaml"
           fi
