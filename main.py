@@ -3,13 +3,13 @@ import sys
 from scraper.utils import (
     load_yaml, save_yaml,
     send_discord_message, fmt_md_codeblock,
+    canon_chapter,                    # <-- NUEVO
 )
 from scraper.http_client import fetch_html
 from scraper.parsers import extract_last_chapter
 
 SERIES_FILE = "series.yaml"
 
-# --- DEBUG de configuración real que ve el runner ---
 print(f"[cfg] FETCH_BACKEND={os.getenv('FETCH_BACKEND')!r}  "
       f"HTTPS_PROXY={'set' if os.getenv('HTTPS_PROXY') else 'unset'}  "
       f"HTTP_PROXY={'set' if os.getenv('HTTP_PROXY') else 'unset'}")
@@ -34,38 +34,36 @@ def main() -> int:
             continue
 
         try:
-            html = fetch_html(url)  # httpx → (fallback) playwright → (forzado) playwright
+            html = fetch_html(url)
             chapter = extract_last_chapter(site, url, html)
 
             if chapter is None:
                 print("   [info] no se detectó capítulo válido")
                 continue
 
-            # primera vez o cambio
-            if last_chapter in (None, "", False):
-                s["last_chapter"] = chapter
-                print(f"   [init] last_chapter = {chapter}")
-                unchanged.append((name, chapter))
+            new_canon = canon_chapter(chapter)
+            old_canon = canon_chapter(last_chapter)
+
+            if old_canon == "":
+                s["last_chapter"] = new_canon
+                print(f"   [init] last_chapter = {new_canon}")
+                unchanged.append((name, new_canon))
             else:
-                # comparar como texto (admite 163.5 etc.)
-                if str(chapter) != str(last_chapter):
-                    s["last_chapter"] = chapter
-                    print(f"   [update] {last_chapter} → {chapter}")
-                    updated.append((name, chapter))
+                if new_canon != old_canon:
+                    print(f"   [update] {old_canon} → {new_canon}")
+                    s["last_chapter"] = new_canon
+                    updated.append((name, new_canon))
                 else:
-                    print(f"   [ok] sin cambios (cap {chapter})")
-                    unchanged.append((name, chapter))
+                    print(f"   [ok] sin cambios (cap {new_canon})")
+                    unchanged.append((name, new_canon))
 
         except Exception as e:
-            # No romper; agregar a errores y silenciar en Discord
             msg = f"fetch: {e}"
             print(f"   [skip] {msg}")
             errors.append((name, msg))
 
-    # Guardar YAML si hubo cambios
     save_yaml(SERIES_FILE, {"series": series})
 
-    # Construir mensaje Discord
     lines = []
     if updated:
         lines.append("**📢 Actualizaciones**")
@@ -73,12 +71,10 @@ def main() -> int:
             lines.append(f"- **{n}** → **{c}**")
         lines.append("")
 
-    # SIEMPRE listar “sin actualización … chapter: X”
     lines.append("**— Sin actualización**")
     for n, c in unchanged:
         lines.append(f"sin actualizacion \"{n}\" chapter: {c}")
 
-    # Errores: solo en el log del job, NO enviar detalle 403 al Discord
     if errors:
         lines.append("")
         lines.append("_(Se omitieron errores de fetch en Discord; revisar logs del job)_")
@@ -91,7 +87,6 @@ def main() -> int:
         print("[warn] DISCORD_WEBHOOK no configurado, imprimiendo mensaje:")
         print(fmt_md_codeblock(text))
 
-    # Resumen en consola
     print("\nResumen:")
     print(f"  Actualizados: {len(updated)}")
     print(f"  Sin actualización: {len(unchanged)}")
