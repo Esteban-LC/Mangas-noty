@@ -1,50 +1,30 @@
-import re
+import os
+import json
 import yaml
-from pathlib import Path
-from typing import Any, Dict, Optional
+import httpx
 
-NUM_RE = re.compile(r'(\d+(?:\.\d+)?)')
-
-def to_number(text: str) -> Optional[float]:
-    if not text:
-        return None
-    m = NUM_RE.search(text.replace(',', '.'))
-    if not m:
-        return None
-    try:
-        return float(m.group(1))
-    except Exception:
-        return None
-
-def canon_chapter(value) -> Optional[str]:
-    """
-    Representación canónica:
-    - 166     -> "166"
-    - 98.60   -> "98.6"
-    - 163.5   -> "163.5"
-    """
-    if value is None:
-        return None
-    try:
-        f = float(value)
-        if f.is_integer():
-            return str(int(f))
-        # quita ceros a la derecha
-        s = f"{f}".rstrip('0').rstrip('.')
-        return s
-    except Exception:
-        # si llega string raro, intenta extraer número
-        num = to_number(str(value))
-        if num is None:
-            return None
-        return canon_chapter(num)
-
-def load_yaml(path: Path) -> Dict[str, Any]:
-    if not path.exists():
+def load_yaml(path: str) -> dict:
+    if not os.path.exists(path):
         return {"series": []}
-    with path.open("r", encoding="utf-8") as fh:
+    with open(path, "r", encoding="utf-8") as fh:
         return yaml.safe_load(fh) or {"series": []}
 
-def save_yaml(path: Path, data: Dict[str, Any]) -> None:
-    with path.open("w", encoding="utf-8") as fh:
-        yaml.dump(data, fh, allow_unicode=True, sort_keys=False)
+def save_yaml(path: str, data: dict) -> None:
+    with open(path, "w", encoding="utf-8") as fh:
+        yaml.safe_dump(data, fh, allow_unicode=True, sort_keys=False)
+
+def fmt_md_codeblock(text: str) -> str:
+    return f"```\n{text}\n```"
+
+def send_discord_message(content: str) -> None:
+    webhook = os.getenv("DISCORD_WEBHOOK")
+    if not webhook:
+        return
+    # payload simple, sin embeds (más robusto)
+    payload = {"content": content[:1900]}  # evitar límite de 2000
+    try:
+        r = httpx.post(webhook, json=payload, timeout=20)
+        r.raise_for_status()
+    except Exception as e:
+        # no hacer raise (no queremos romper el job por Discord)
+        print(f"[discord] error: {e}")
