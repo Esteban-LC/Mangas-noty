@@ -2,7 +2,7 @@ name: manga-watcher
 
 on:
   schedule:
-    - cron: "*/30 * * * *"   # cada 30 minutos
+    - cron: "*/15 * * * *"   # cada 15 minutos
   workflow_dispatch:
   push:
     paths:
