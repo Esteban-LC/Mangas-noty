@@ -1,140 +1,107 @@
 import os
 import sys
-from pathlib import Path
-from typing import List, Tuple
+from scraper.utils import (
+    load_yaml, save_yaml,
+    send_discord_message, fmt_md_codeblock,
+)
+from scraper.http_client import fetch_html
+from scraper.parsers import extract_last_chapter
 
-import requests
+SERIES_FILE = "series.yaml"
 
-from scraper.core import fetch
-from scraper.parsers import resolve_parser
-from scraper.utils import load_yaml, save_yaml, canon_chapter
+# --- DEBUG de configuración real que ve el runner ---
+print(f"[cfg] FETCH_BACKEND={os.getenv('FETCH_BACKEND')!r}  "
+      f"HTTPS_PROXY={'set' if os.getenv('HTTPS_PROXY') else 'unset'}  "
+      f"HTTP_PROXY={'set' if os.getenv('HTTP_PROXY') else 'unset'}")
 
-# ======== CONFIG =========
-SEND_UNCHANGED = True                 # queremos "sin actualizacion ..."
-SERIES_FILE = Path("series.yaml")
-DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK")  # define en GitHub Secrets
-MAX_DISCORD_CHARS = 1900              # margen bajo 2000
-# =========================
-
-def fmt(num) -> str:
-    return canon_chapter(num) or "?"
-
-def chunk_text(s: str, limit: int = MAX_DISCORD_CHARS) -> List[str]:
-    out, cur, cur_len = [], [], 0
-    for line in s.splitlines():
-        ln = len(line) + 1
-        if cur_len + ln > limit and cur:
-            out.append("\n".join(cur))
-            cur, cur_len = [], 0
-        cur.append(line)
-        cur_len += ln
-    if cur:
-        out.append("\n".join(cur))
-    return out
-
-def notify_discord(updates: List[Tuple[str,str,str,str]], unchanged: List[Tuple[str,str]]) -> None:
-    if not DISCORD_WEBHOOK:
-        print("No DISCORD_WEBHOOK — saltando notificación.")
-        return
-
-    lines = []
-    if updates:
-        lines.append("**✅ Actualizados**")
-        for name, old, new, href in updates:
-            link = f" <{href}>" if href else ""
-            lines.append(f'- "{name}": {old} → **{new}**{link}')
-
-    if SEND_UNCHANGED and unchanged:
-        lines.append("**➖ Sin actualización**")
-        for name, cur in unchanged:
-            lines.append(f'sin actualizacion "{name}" chapter: {cur}')
-
-    if not lines:
-        print("Nada para notificar.")
-        return
-
-    payloads = chunk_text("\n".join(lines))
-    for part in payloads:
-        try:
-            requests.post(DISCORD_WEBHOOK, json={"content": part}, timeout=20)
-        except Exception as e:
-            print(f"Fallo al notificar Discord (silencioso): {e}")
 
 def main() -> int:
     data = load_yaml(SERIES_FILE)
-    series = data.get("series") or []
-
-    updates: List[Tuple[str,str,str,str]] = []   # (name, old, new, href)
-    unchanged: List[Tuple[str,str]] = []         # (name, cur)
-    skipped_errors: List[Tuple[str,str]] = []    # logs/summary solo
+    series = data.get("series", [])
+    updated = []
+    unchanged = []
+    errors = []
 
     for s in series:
-        name = s.get("name", "").strip()
-        url  = s.get("url", "").strip()
-        if not name or not url:
-            continue
-
-        stored_raw = s.get("last_chapter")
-        stored = fmt(stored_raw)
+        name = s.get("name") or "(sin nombre)"
+        site = s.get("site") or ""
+        url = s.get("url") or ""
+        last_chapter = s.get("last_chapter")
 
         print(f"==> {name}")
+        if not url:
+            print("   [skip] sin url")
+            continue
+
         try:
-            html = fetch(url)
+            html = fetch_html(url)  # httpx → (fallback) playwright → (forzado) playwright
+            chapter = extract_last_chapter(site, url, html)
+
+            if chapter is None:
+                print("   [info] no se detectó capítulo válido")
+                continue
+
+            # primera vez o cambio
+            if last_chapter in (None, "", False):
+                s["last_chapter"] = chapter
+                print(f"   [init] last_chapter = {chapter}")
+                unchanged.append((name, chapter))
+            else:
+                # comparar como texto (admite 163.5 etc.)
+                if str(chapter) != str(last_chapter):
+                    s["last_chapter"] = chapter
+                    print(f"   [update] {last_chapter} → {chapter}")
+                    updated.append((name, chapter))
+                else:
+                    print(f"   [ok] sin cambios (cap {chapter})")
+                    unchanged.append((name, chapter))
+
         except Exception as e:
-            print(f"   [skip] fetch error: {e}")
-            skipped_errors.append((name, f"fetch: {e}"))
-            # no tocamos last_chapter ni notificamos
-            continue
+            # No romper; agregar a errores y silenciar en Discord
+            msg = f"fetch: {e}"
+            print(f"   [skip] {msg}")
+            errors.append((name, msg))
 
-        parser = resolve_parser(url)
-        try:
-            best = parser(url, html)
-        except Exception as e:
-            print(f"   [skip] parser error: {e}")
-            skipped_errors.append((name, f"parser: {e}"))
-            continue
+    # Guardar YAML si hubo cambios
+    save_yaml(SERIES_FILE, {"series": series})
 
-        found_num = fmt(best.get("num"))
-        found_href = best.get("href")
-        if found_num == "?":
-            print("   [info] no se detectó capítulo válido")
-            # si ya teníamos baseline, lo marcamos como sin actualización
-            if stored and stored != "?":
-                unchanged.append((name, stored))
-            continue
+    # Construir mensaje Discord
+    lines = []
+    if updated:
+        lines.append("**📢 Actualizaciones**")
+        for n, c in updated:
+            lines.append(f"- **{n}** → **{c}**")
+        lines.append("")
 
-        # primera vez
-        if not stored_raw:
-            s["last_chapter"] = found_num
-            print(f"   [init] last_chapter = {found_num}")
-            unchanged.append((name, found_num))
-            continue
+    # SIEMPRE listar “sin actualización … chapter: X”
+    lines.append("**— Sin actualización**")
+    for n, c in unchanged:
+        lines.append(f"sin actualizacion \"{n}\" chapter: {c}")
 
-        if found_num != stored:
-            print(f"   [update] {stored} → {found_num}")
-            s["last_chapter"] = found_num
-            updates.append((name, stored, found_num, found_href or url))
-        else:
-            print(f"   [ok] sin cambios (cap {stored})")
-            unchanged.append((name, stored))
+    # Errores: solo en el log del job, NO enviar detalle 403 al Discord
+    if errors:
+        lines.append("")
+        lines.append("_(Se omitieron errores de fetch en Discord; revisar logs del job)_")
 
-    # persistimos siempre (por si hubo inicializaciones)
-    save_yaml(SERIES_FILE, data)
+    text = "\n".join(lines)
+    webhook = os.getenv("DISCORD_WEBHOOK")
+    if webhook:
+        send_discord_message(text)
+    else:
+        print("[warn] DISCORD_WEBHOOK no configurado, imprimiendo mensaje:")
+        print(fmt_md_codeblock(text))
 
-    # Notificaciones
-    if updates or (SEND_UNCHANGED and unchanged):
-        notify_discord(updates, unchanged)
-
-    # Resumen en stdout (útil en Actions)
+    # Resumen en consola
     print("\nResumen:")
-    print(f"  Actualizados: {len(updates)}")
+    print(f"  Actualizados: {len(updated)}")
     print(f"  Sin actualización: {len(unchanged)}")
-    if skipped_errors:
-        print(f"  Con errores (silenciados en Discord): {len(skipped_errors)}")
-        for n, r in skipped_errors[:10]:
-            print(f"   - {n}: {r}")
-
+    print(f"  Con errores (silenciados en Discord): {len(errors)}")
+    for n, m in errors[:10]:
+        print(f"   - {n}: {m}")
+    if len(errors) > 10:
+        print(f"   … +{len(errors)-10} más")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
