@@ -1,144 +1,115 @@
+# -*- coding: utf-8 -*-
 import re
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse
 
-# --- Utilidades de extracción ---
-
-# encuentra TODAS las apariciones de "Capítulo/Chapter N(.M)?" en una cadena
-_RE_CAP_GENERIC = re.compile(
-    r"(?:cap[ií]tulo|chapter)\s*([0-9]+(?:\.[0-9]+)?)",
-    re.I
-)
-
-# patrones comunes en URLs: /capitulo/123/, /chapter-12-5, /capitulo-7.1, etc.
-_RE_URL_NUM = re.compile(
-    r"(?:cap[ií]tulo|chapter|chap|ep|c(?:ap)?)[-_/ ]*([0-9]+(?:\.[0-9]+)?)",
-    re.I
-)
-
-def _bs(html: str):
+def _bs(html: str) -> BeautifulSoup:
     return BeautifulSoup(html, "html.parser")
 
-def _collect_numbers_from_texts(texts):
-    nums = []
-    for t in texts:
-        for m in _RE_CAP_GENERIC.finditer(t):
-            nums.append(m.group(1))
-    return nums
+def _norm_tuple(s: str):
+    # "119" -> (119, -1) ; "17.3" -> (17, 30) ; "17.30" -> (17, 30)
+    s = str(s).strip()
+    if "." in s:
+        a, b = s.split(".", 1)
+        return (int(a), int(b.ljust(2, "0")[:2]))
+    return (int(s), -1)
 
-def _collect_numbers_from_links(soup: BeautifulSoup):
-    nums = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        # del texto del enlace
-        txt = a.get_text(" ", strip=True)
-        for m in _RE_CAP_GENERIC.finditer(txt):
-            nums.append(m.group(1))
-        # del href
-        for m in _RE_URL_NUM.finditer(href):
-            nums.append(m.group(1))
-    return nums
-
-def _pick_max(nums):
-    """
-    nums: lista de strings numéricos ('1', '17.3', '119.00')
-    devuelve el mayor como string normalizado (sin ceros de más) p.ej. '119' o '17.3'
-    """
+def _pick_max(nums: list[str]) -> str | None:
     if not nums:
         return None
-    # ordenar por valor float con cuidado por decimales
-    def _key(x):
+    parsed = []
+    for s in nums:
         try:
-            return float(x)
+            t = _norm_tuple(s)
+            parsed.append((t, s))
         except Exception:
-            return -1.0
-    best = max(nums, key=_key)
-    # normalización ligera: quitar ceros redundantes
-    if "." in best:
-        best = best.rstrip("0").rstrip(".")
-    return best
-
-# --- Parsers por dominio (extraen muchos textos, luego eligen el máximo) ---
-
-def parse_manga_oni(url: str, html: str) -> str | None:
-    soup = _bs(html)
-    texts = [h.get_text(" ", strip=True) for h in soup.select("#c_list .entry-title-h2, #c_list a")]
-    nums = _collect_numbers_from_texts(texts)
-    nums += _collect_numbers_from_links(soup)
-    return _pick_max(nums)
-
-def parse_mangasnosekai(url: str, html: str) -> str | None:
-    soup = _bs(html)
-    texts = [x.get_text(" ", strip=True) for x in soup.select(
-        ".container-capitulos * , .grid-capitulos * , #section-list-cap * , #section-sinopsis *"
-    )]
-    nums = _collect_numbers_from_texts(texts)
-    nums += _collect_numbers_from_links(soup)
-    return _pick_max(nums)
-
-def parse_zonatmo(url: str, html: str) -> str | None:
-    soup = _bs(html)
-    # h4 del upload-link + cualquier <a> bajo chapter-list
-    texts = [a.get_text(" ", strip=True) for a in soup.select(".chapters .upload-link h4 a, .chapters .chapter-list a, .list-group a")]
-    nums = _collect_numbers_from_texts(texts)
-    nums += _collect_numbers_from_links(soup)
-    return _pick_max(nums)
-
-def parse_leercapitulo(url: str, html: str) -> str | None:
-    soup = _bs(html)
-    texts = [a.get_text(" ", strip=True) for a in soup.select(".chapter-list a, .chapter-list h4, a.xanh")]
-    nums = _collect_numbers_from_texts(texts)
-    nums += _collect_numbers_from_links(soup)
-    return _pick_max(nums)
-
-def parse_bokugents(url: str, html: str) -> str | None:
-    soup = _bs(html)
-    texts = [a.get_text(" ", strip=True) for a in soup.select("a, h1, h2, h3, li, .wp-manga-chapter, .chapter-release-date, .list-chap")]
-    nums = _collect_numbers_from_texts(texts)
-    nums += _collect_numbers_from_links(soup)
-    return _pick_max(nums)
-
-def parse_m440(url: str, html: str) -> str | None:
-    soup = _bs(html)
-    texts = [a.get_text(" ", strip=True) for a in soup.select(
-        ".chapter-list a, .wp-manga-chapter a, .listing-chapters_wrap a, a, h3, li"
-    )]
-    nums = _collect_numbers_from_texts(texts)
-    nums += _collect_numbers_from_links(soup)
-    return _pick_max(nums)
-
-def parse_animebbg(url: str, html: str) -> str | None:
-    soup = _bs(html)
-    texts = [a.get_text(" ", strip=True) for a in soup.select(".chapters a, .list-group a, a, h3, li")]
-    nums = _collect_numbers_from_texts(texts)
-    nums += _collect_numbers_from_links(soup)
-    return _pick_max(nums)
-
-# --- Router ---
-
-def extract_last_chapter(site: str, url: str, html: str) -> str | None:
-    u = (url or "").lower()
-    try:
-        if "manga-oni.com" in u:
-            return parse_manga_oni(u, html)
-        if "mangasnosekai.com" in u:
-            return parse_mangasnosekai(u, html)
-        if "zonatmo.com" in u:
-            return parse_zonatmo(u, html)
-        if "leercapitulo.co" in u:
-            return parse_leercapitulo(u, html)
-        if "bokugents.com" in u:
-            return parse_bokugents(u, html)
-        if "m440.in" in u:
-            return parse_m440(u, html)
-        if "animebbg.net" in u:
-            return parse_animebbg(u, html)
-
-        # Fallback súper genérico: escanear todo el HTML por texto + hrefs
-        soup = _bs(html)
-        all_text = [soup.get_text(" ", strip=True)]
-        nums = _collect_numbers_from_texts(all_text)
-        nums += _collect_numbers_from_links(soup)
-        return _pick_max(nums)
-    except Exception:
+            pass
+    if not parsed:
         return None
+    # descarta números absurdos (> 2000) si hay opciones razonables
+    plaus = [p for p in parsed if p[0][0] <= 2000] or parsed
+    best = max(plaus, key=lambda x: x[0])[1]
+    if "." in best:
+        a, b = best.split(".", 1)
+        return f"{int(a)}.{b.ljust(2,'0')[:2]}"
+    return str(int(best))
+
+# -------- ANIMEBBG.NET --------
+def parse_animebbg(url: str, html: str) -> str | None:
+    """
+    Solo lee los elementos del listado de capítulos:
+      .structItem--resourceAlbum  .structItem-title  a[href^="/comics/capitulo/"]
+    Ignora contadores 'Capítulos (N)' y números ajenos.
+    """
+    soup = _bs(html)
+    nums = []
+
+    for a in soup.select('.structItem--resourceAlbum .structItem-title a[href^="/comics/capitulo/"]'):
+        t = a.get_text(strip=True)
+        m = re.search(r'Cap[ií]tulo\s*([0-9]+(?:\.[0-9]+)?)', t, re.I)
+        if m:
+            nums.append(m.group(1))
+
+    if not nums:
+        # fallback: usa el texto completo del título del item
+        for title in soup.select('.structItem--resourceAlbum .structItem-title'):
+            t = title.get_text(" ", strip=True)
+            m = re.search(r'Cap[ií]tulo\s*([0-9]+(?:\.[0-9]+)?)', t, re.I)
+            if m:
+                nums.append(m.group(1))
+
+    return _pick_max(nums)
+
+# -------- M440.IN --------
+def parse_m440(url: str, html: str) -> str | None:
+    """
+    Fuente de verdad: <a ... data-number="N"> dentro de cada <h5>.
+    Fallback: '#N' en el <h5>.
+    """
+    soup = _bs(html)
+    nums = []
+
+    for a in soup.select('h5 a[data-number]'):
+        raw = (a.get('data-number') or "").strip()
+        if re.fullmatch(r'\d+(?:\.\d+)?', raw):
+            nums.append(raw)
+
+    if not nums:
+        for h5 in soup.select('li[class*="DTyuZxQygzByzNbtcmg-lis"] h5'):
+            t = h5.get_text(" ", strip=True)
+            m = re.search(r'#\s*([0-9]+(?:\.[0-9]+)?)\b', t)
+            if m:
+                nums.append(m.group(1))
+
+    return _pick_max(nums)
+
+# -------- ZONATMO --------
+def parse_zonatmo(url: str, html: str) -> str | None:
+    """
+    Extrae del listado de capítulos: enlaces con texto tipo 'Capítulo N' o '#N'.
+    """
+    soup = _bs(html)
+    nums = []
+    # prueba varios selectores típicos
+    for sel in [
+        'a', 
+        '.chapters a',
+        '.chapter-list a',
+        'li a',
+    ]:
+        for a in soup.select(sel):
+            t = a.get_text(" ", strip=True)
+            m = re.search(r'(?:Cap[ií]tulo|#)\s*([0-9]+(?:\.[0-9]+)?)', t, re.I)
+            if m:
+                nums.append(m.group(1))
+    return _pick_max(nums)
+
+# -------- MANGASNOSekai / BOKUGENTS (genérico simple) --------
+def parse_generic_caplist(url: str, html: str) -> str | None:
+    soup = _bs(html)
+    nums = []
+    for a in soup.find_all('a'):
+        t = a.get_text(" ", strip=True)
+        m = re.search(r'(?:Cap[ií]tulo|Capitulo|#)\s*([0-9]+(?:\.[0-9]+)?)', t, re.I)
+        if m:
+            nums.append(m.group(1))
+    return _pick_max(nums)
